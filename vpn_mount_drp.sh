@@ -17,6 +17,7 @@ LOG_KEEP=3
 STATE_DIR="${HOME}/Library/Application Support/vpn_mount_drp"
 STATE_FILE="${STATE_DIR}/vpn_state"
 LOCK_DIR="${STATE_DIR}/run.lock"
+LOCK_PID_FILE="${LOCK_DIR}/pid"
 
 # Share-Namen auf den Servern
 SHARES_125=("privat" "AEGIDA" "Praxis")
@@ -196,12 +197,44 @@ mount_share() {
 rotate_log_file "${LOG_FILE}" "${LOG_MAX_BYTES}" "${LOG_KEEP}"
 rotate_log_file "${ERR_FILE}" "${LOG_MAX_BYTES}" "${LOG_KEEP}"
 
+release_lock() {
+  rm -f "${LOCK_PID_FILE}" 2>/dev/null || true
+  rmdir "${LOCK_DIR}" 2>/dev/null || true
+}
+
+acquire_lock() {
+  local lock_pid=""
+
+  if mkdir "${LOCK_DIR}" 2>/dev/null; then
+    echo "$$" > "${LOCK_PID_FILE}"
+    return 0
+  fi
+
+  if [ -f "${LOCK_PID_FILE}" ]; then
+    lock_pid="$(cat "${LOCK_PID_FILE}" 2>/dev/null || true)"
+    if [ -n "${lock_pid}" ] && kill -0 "${lock_pid}" 2>/dev/null; then
+      log "Ein anderer Lauf ist aktiv (PID ${lock_pid}). Beende diesen Lauf."
+      return 1
+    fi
+  fi
+
+  log "Stale Lock erkannt. Entferne ${LOCK_DIR} und starte neu."
+  rm -rf "${LOCK_DIR}"
+
+  if mkdir "${LOCK_DIR}" 2>/dev/null; then
+    echo "$$" > "${LOCK_PID_FILE}"
+    return 0
+  fi
+
+  log "Lock konnte nicht gesetzt werden. Beende diesen Lauf."
+  return 1
+}
+
 mkdir -p "${STATE_DIR}"
-if ! mkdir "${LOCK_DIR}" 2>/dev/null; then
-  log "Ein anderer Lauf ist aktiv. Beende diesen Lauf."
+if ! acquire_lock; then
   exit 0
 fi
-trap 'rmdir "${LOCK_DIR}" 2>/dev/null || true' EXIT
+trap 'release_lock' EXIT INT TERM
 
 previous_state="$(read_previous_state)"
 route_iface="$(wait_for_vpn_ready || true)"
