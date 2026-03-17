@@ -16,11 +16,16 @@ LOG_MAX_BYTES=204800
 LOG_KEEP=3
 STATE_DIR="${HOME}/Library/Application Support/vpn_mount_drp"
 STATE_FILE="${STATE_DIR}/vpn_state"
+LOCK_DIR="${STATE_DIR}/run.lock"
 
 # Share-Namen auf den Servern
 SHARES_125=("privat" "AEGIDA" "Praxis")
 SHARES_157=("Buchhaltung")
 SHORTCUT_ROOT="${HOME}/Netzlaufwerke"
+
+log() {
+  printf '%s %s\n' "$(date '+%Y-%m-%d %H:%M:%S')" "$*"
+}
 
 rotate_log_file() {
   local file_path="$1"
@@ -75,7 +80,7 @@ create_shortcut() {
 
   mkdir -p "${SHORTCUT_ROOT}"
   ln -sfn "${mount_point}" "${shortcut_path}"
-  echo "Shortcut aktualisiert: ${shortcut_path} -> ${mount_point}"
+  log "Shortcut aktualisiert: ${shortcut_path} -> ${mount_point}"
 }
 
 read_previous_state() {
@@ -115,6 +120,25 @@ vpn_is_ready() {
   return 0
 }
 
+wait_for_vpn_ready() {
+  local elapsed=0
+  local route_iface
+
+  while [ "${elapsed}" -le "${WAIT_SECONDS}" ]; do
+    route_iface="$(vpn_is_ready || true)"
+    if [ -n "${route_iface}" ] && is_vpn_interface "${route_iface}"; then
+      echo "${route_iface}"
+      return 0
+    fi
+
+    sleep "${INTERVAL_SECONDS}"
+    elapsed=$((elapsed + INTERVAL_SECONDS))
+  done
+
+  echo "${route_iface:-}"
+  return 1
+}
+
 mount_share() {
   local server_ip="$1"
   local share_name="$2"
@@ -134,7 +158,7 @@ mount_share() {
   fi
 
   for retry in $(seq 1 "${MOUNT_RETRIES}"); do
-    echo "Verbinde (${retry}/${MOUNT_RETRIES}) ${smb_url}"
+    log "Verbinde (${retry}/${MOUNT_RETRIES}) ${smb_url}"
     # Triggert den macOS-Login-Dialog. Passwort kann dort manuell eingegeben werden.
     open "${smb_url}" || true
 
@@ -147,7 +171,7 @@ mount_share() {
       sleep 1
     done
 
-    echo "Fallback ohne Domain: ${smb_url_fallback}"
+    log "Fallback ohne Domain: ${smb_url_fallback}"
     open "${smb_url_fallback}" || true
     for i in $(seq 1 "${MOUNT_CONFIRM_SECONDS}"); do
       mount_point="$(get_mount_point "${smb_path}" || true)"
@@ -165,35 +189,52 @@ mount_share() {
     done
   done
 
-  echo "Mount nicht bestaetigt: ${smb_url}"
+  log "Mount nicht bestaetigt: ${smb_url}"
   return 1
 }
 
 rotate_log_file "${LOG_FILE}" "${LOG_MAX_BYTES}" "${LOG_KEEP}"
 rotate_log_file "${ERR_FILE}" "${LOG_MAX_BYTES}" "${LOG_KEEP}"
 
-previous_state="$(read_previous_state)"
-route_iface="$(vpn_is_ready || true)"
+mkdir -p "${STATE_DIR}"
+if ! mkdir "${LOCK_DIR}" 2>/dev/null; then
+  log "Ein anderer Lauf ist aktiv. Beende diesen Lauf."
+  exit 0
+fi
+trap 'rmdir "${LOCK_DIR}" 2>/dev/null || true' EXIT
 
-if [ -z "${route_iface}" ] || ! is_vpn_interface "${route_iface}" || ! ping -c 1 -W 1000 "${VPN_TEST_HOST}" >/dev/null 2>&1; then
-  echo "VPN nicht bereit (Interface: ${route_iface:-none}). Merke Zustand: vpn_down."
+previous_state="$(read_previous_state)"
+route_iface="$(wait_for_vpn_ready || true)"
+
+if [ -z "${route_iface}" ] || ! is_vpn_interface "${route_iface}"; then
+  log "VPN nicht bereit (Interface: ${route_iface:-none}). Merke Zustand: vpn_down."
   write_state "vpn_down"
   exit 0
 fi
 
 if [ "${previous_state}" = "vpn_up" ]; then
-  echo "VPN ist weiter aktiv ueber ${route_iface}. Kein Reconnect erkannt, kein Mount-Lauf."
+  log "VPN ist weiter aktiv ueber ${route_iface}. Kein Reconnect erkannt, kein Mount-Lauf."
   exit 0
 fi
 
-echo "VPN-Reconnect erkannt (${previous_state} -> vpn_up) ueber ${route_iface}. Starte Mount ..."
+log "VPN-Reconnect erkannt (${previous_state} -> vpn_up) ueber ${route_iface}. Starte Mount ..."
+mount_failures=0
 for share in "${SHARES_125[@]}"; do
-  mount_share "192.168.115.125" "${share}"
+  if ! mount_share "192.168.115.125" "${share}"; then
+    mount_failures=$((mount_failures + 1))
+  fi
 done
 
 for share in "${SHARES_157[@]}"; do
-  mount_share "192.168.115.157" "${share}"
+  if ! mount_share "192.168.115.157" "${share}"; then
+    mount_failures=$((mount_failures + 1))
+  fi
 done
 
+if [ "${mount_failures}" -gt 0 ]; then
+  log "Mount-Lauf beendet mit ${mount_failures} Fehler(n)."
+  exit 1
+fi
+
 write_state "vpn_up"
-echo "Fertig."
+log "Fertig."
