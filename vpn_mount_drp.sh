@@ -115,17 +115,12 @@ write_state() {
   echo "${state}" > "${STATE_FILE}"
 }
 
-vpn_is_ready() {
+target_network_is_ready() {
   local route_iface
   route_iface="$(get_route_interface "${VPN_TEST_HOST}" || true)"
 
   if [ -z "${route_iface}" ]; then
     echo ""
-    return 1
-  fi
-
-  if ! is_vpn_interface "${route_iface}"; then
-    echo "${route_iface}"
     return 1
   fi
 
@@ -138,13 +133,13 @@ vpn_is_ready() {
   return 0
 }
 
-wait_for_vpn_ready() {
+wait_for_target_network_ready() {
   local elapsed=0
   local route_iface
 
   while [ "${elapsed}" -le "${WAIT_SECONDS}" ]; do
-    route_iface="$(vpn_is_ready || true)"
-    if [ -n "${route_iface}" ] && is_vpn_interface "${route_iface}"; then
+    route_iface="$(target_network_is_ready || true)"
+    if [ -n "${route_iface}" ]; then
       echo "${route_iface}"
       return 0
     fi
@@ -290,30 +285,34 @@ fi
 trap 'release_lock' EXIT INT TERM
 
 previous_state="$(read_previous_state)"
-route_iface="$(wait_for_vpn_ready || true)"
+route_iface="$(wait_for_target_network_ready || true)"
 run_reason="reconnect"
+connection_type="local_or_hw_vpn"
+if is_vpn_interface "${route_iface:-}"; then
+  connection_type="client_vpn"
+fi
 
-if [ -z "${route_iface}" ] || ! is_vpn_interface "${route_iface}"; then
-  log "VPN nicht bereit (Interface: ${route_iface:-none}). Merke Zustand: vpn_down."
-  write_state "vpn_down"
+if [ -z "${route_iface}" ]; then
+  log "Zielnetz 192.168.115.x nicht erreichbar (Interface: ${route_iface:-none}). Merke Zustand: net_down."
+  write_state "net_down"
   exit 0
 fi
 
-if [ "${previous_state}" = "vpn_up" ]; then
+if [ "${previous_state}" = "vpn_up" ] || [ "${previous_state}" = "net_up" ]; then
   missing_shares="$(missing_share_count)"
   if [ "${missing_shares}" -eq 0 ]; then
-    log "VPN ist weiter aktiv ueber ${route_iface}. Kein Reconnect erkannt, kein Mount-Lauf."
+    log "Netzzugriff bleibt aktiv ueber ${route_iface} (${connection_type}). Kein Reconnect erkannt, kein Mount-Lauf."
     exit 0
   fi
 
   run_reason="recovery"
-  log "VPN ist aktiv ueber ${route_iface}, aber ${missing_shares} Share(s) fehlen. Starte Recovery-Mount."
+  log "Netzzugriff aktiv ueber ${route_iface} (${connection_type}), aber ${missing_shares} Share(s) fehlen. Starte Recovery-Mount."
 fi
 
 if [ "${run_reason}" = "reconnect" ]; then
-  log "VPN-Reconnect erkannt (${previous_state} -> vpn_up) ueber ${route_iface}. Starte Mount ..."
+  log "Netzzugriff erkannt (${previous_state} -> net_up) ueber ${route_iface} (${connection_type}). Starte Mount ..."
 else
-  log "Recovery-Mount gestartet ueber ${route_iface}."
+  log "Recovery-Mount gestartet ueber ${route_iface} (${connection_type})."
 fi
 mount_failures=0
 failed_shares=()
@@ -338,5 +337,5 @@ if [ "${mount_failures}" -gt 0 ]; then
   exit 1
 fi
 
-write_state "vpn_up"
+write_state "net_up"
 log "Fertig."
