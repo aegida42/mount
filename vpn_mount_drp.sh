@@ -23,9 +23,26 @@ LOCK_PID_FILE="${LOCK_DIR}/pid"
 SHARES_125=("privat" "AEGIDA" "Praxis")
 SHARES_157=("Buchhaltung")
 SHORTCUT_ROOT="${HOME}/Netzlaufwerke"
+NOTIFY_ON_FAILURE=1
 
 log() {
   printf '%s %s\n' "$(date '+%Y-%m-%d %H:%M:%S')" "$*"
+}
+
+notify_user() {
+  local title="$1"
+  local message="$2"
+
+  [ "${NOTIFY_ON_FAILURE}" -eq 1 ] || return 0
+  [ -x "/usr/bin/osascript" ] || return 0
+
+  /usr/bin/osascript - "${title}" "${message}" <<'APPLESCRIPT' >/dev/null 2>&1 || true
+on run argv
+  set notifTitle to item 1 of argv
+  set notifMessage to item 2 of argv
+  display notification notifMessage with title notifTitle
+end run
+APPLESCRIPT
 }
 
 rotate_log_file() {
@@ -299,20 +316,25 @@ else
   log "Recovery-Mount gestartet ueber ${route_iface}."
 fi
 mount_failures=0
+failed_shares=()
 for share in "${SHARES_125[@]}"; do
   if ! mount_share "192.168.115.125" "${share}"; then
     mount_failures=$((mount_failures + 1))
+    failed_shares+=("192.168.115.125/${share}")
   fi
 done
 
 for share in "${SHARES_157[@]}"; do
   if ! mount_share "192.168.115.157" "${share}"; then
     mount_failures=$((mount_failures + 1))
+    failed_shares+=("192.168.115.157/${share}")
   fi
 done
 
 if [ "${mount_failures}" -gt 0 ]; then
-  log "Mount-Lauf beendet mit ${mount_failures} Fehler(n)."
+  failed_text="${(j:, :)failed_shares}"
+  log "Mount-Lauf beendet mit ${mount_failures} Fehler(n): ${failed_text}"
+  notify_user "VPN-Mount Fehler" "${mount_failures} Share(s) fehlgeschlagen: ${failed_text}"
   exit 1
 fi
 
