@@ -36,13 +36,13 @@ notify_user() {
   [ "${NOTIFY_ON_FAILURE}" -eq 1 ] || return 0
   [ -x "/usr/bin/osascript" ] || return 0
 
-  /usr/bin/osascript - "${title}" "${message}" <<'APPLESCRIPT' >/dev/null 2>&1 || true
-on run argv
-  set notifTitle to item 1 of argv
-  set notifMessage to item 2 of argv
-  display notification notifMessage with title notifTitle
-end run
-APPLESCRIPT
+  /usr/bin/osascript -l JavaScript - "${title}" "${message}" <<'JXA' >/dev/null 2>&1 || true
+function run(argv) {
+  var app = Application.currentApplication();
+  app.includeStandardAdditions = true;
+  app.displayNotification(argv[1], { withTitle: argv[0] });
+}
+JXA
 }
 
 rotate_log_file() {
