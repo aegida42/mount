@@ -194,6 +194,42 @@ mount_share() {
   return 1
 }
 
+is_share_mounted() {
+  local server_ip="$1"
+  local share_name="$2"
+  local smb_path="//${DOMAIN};${USER_NAME}@${server_ip}/${share_name}"
+  local smb_path_fallback="//${USER_NAME}@${server_ip}/${share_name}"
+
+  if [ -n "$(get_mount_point "${smb_path}" || true)" ]; then
+    return 0
+  fi
+
+  if [ -n "$(get_mount_point "${smb_path_fallback}" || true)" ]; then
+    return 0
+  fi
+
+  return 1
+}
+
+missing_share_count() {
+  local missing=0
+  local share
+
+  for share in "${SHARES_125[@]}"; do
+    if ! is_share_mounted "192.168.115.125" "${share}"; then
+      missing=$((missing + 1))
+    fi
+  done
+
+  for share in "${SHARES_157[@]}"; do
+    if ! is_share_mounted "192.168.115.157" "${share}"; then
+      missing=$((missing + 1))
+    fi
+  done
+
+  echo "${missing}"
+}
+
 rotate_log_file "${LOG_FILE}" "${LOG_MAX_BYTES}" "${LOG_KEEP}"
 rotate_log_file "${ERR_FILE}" "${LOG_MAX_BYTES}" "${LOG_KEEP}"
 
@@ -238,6 +274,7 @@ trap 'release_lock' EXIT INT TERM
 
 previous_state="$(read_previous_state)"
 route_iface="$(wait_for_vpn_ready || true)"
+run_reason="reconnect"
 
 if [ -z "${route_iface}" ] || ! is_vpn_interface "${route_iface}"; then
   log "VPN nicht bereit (Interface: ${route_iface:-none}). Merke Zustand: vpn_down."
@@ -246,11 +283,21 @@ if [ -z "${route_iface}" ] || ! is_vpn_interface "${route_iface}"; then
 fi
 
 if [ "${previous_state}" = "vpn_up" ]; then
-  log "VPN ist weiter aktiv ueber ${route_iface}. Kein Reconnect erkannt, kein Mount-Lauf."
-  exit 0
+  missing_shares="$(missing_share_count)"
+  if [ "${missing_shares}" -eq 0 ]; then
+    log "VPN ist weiter aktiv ueber ${route_iface}. Kein Reconnect erkannt, kein Mount-Lauf."
+    exit 0
+  fi
+
+  run_reason="recovery"
+  log "VPN ist aktiv ueber ${route_iface}, aber ${missing_shares} Share(s) fehlen. Starte Recovery-Mount."
 fi
 
-log "VPN-Reconnect erkannt (${previous_state} -> vpn_up) ueber ${route_iface}. Starte Mount ..."
+if [ "${run_reason}" = "reconnect" ]; then
+  log "VPN-Reconnect erkannt (${previous_state} -> vpn_up) ueber ${route_iface}. Starte Mount ..."
+else
+  log "Recovery-Mount gestartet ueber ${route_iface}."
+fi
 mount_failures=0
 for share in "${SHARES_125[@]}"; do
   if ! mount_share "192.168.115.125" "${share}"; then
